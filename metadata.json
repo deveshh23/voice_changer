@@ -1,0 +1,7 @@
+{
+  "name": "VoicePulse DSP",
+  "description": "A high-performance real-time voice modulator with modular DSP effects, visualizers, and AI-powered voice styling.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
