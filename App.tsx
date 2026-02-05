@@ -1,267 +1,346 @@
+import React, { useState, useEffect } from 'react';
+import io, { Socket } from 'socket.io-client';
 
-import React, { useState, useEffect, useRef } from 'react';
-import { AudioEngine } from './services/AudioEngine';
-import { GeminiStylist } from './services/GeminiStylist';
-import { Visualizer } from './components/Visualizer';
-import { EffectSlider } from './components/EffectSlider';
-import { DEFAULT_PRESETS } from './constants/Presets';
-import { AppStatus, EffectSettings, AudioDevice, Preset } from './types';
+interface VoicePreset {
+  id: string;
+  name: string;
+  pitch: number;
+  description: string;
+  emoji: string;
+}
+
+const VOICE_PRESETS: VoicePreset[] = [
+  { id: 'normal', name: 'Normal', pitch: 0, description: 'Your natural voice', emoji: '😊' },
+  { id: 'deep', name: 'Deep Voice', pitch: -4, description: 'Lower, masculine', emoji: '🦁' },
+  { id: 'very_deep', name: 'Very Deep', pitch: -8, description: 'Demon-like', emoji: '👹' },
+  { id: 'slight_deep', name: 'Slightly Deep', pitch: -2, description: 'Subtle depth', emoji: '🐻' },
+  { id: 'high', name: 'High Pitch', pitch: 5, description: 'Chipmunk-like', emoji: '🐿️' },
+  { id: 'very_high', name: 'Very High', pitch: 10, description: 'Alien-like', emoji: '👽' },
+  { id: 'slight_high', name: 'Slightly High', pitch: 2, description: 'Subtle brightness', emoji: '🐦' },
+  { id: 'robot', name: 'Robot', pitch: -6, description: 'Mechanical', emoji: '🤖' },
+];
 
 const App: React.FC = () => {
-  const [status, setStatus] = useState<AppStatus>(AppStatus.IDLE);
-  const [devices, setDevices] = useState<AudioDevice[]>([]);
-  const [selectedInput, setSelectedInput] = useState<string>('');
-  const [settings, setSettings] = useState<EffectSettings>(DEFAULT_PRESETS[0].settings);
-  const [activePreset, setActivePreset] = useState<string>(DEFAULT_PRESETS[0].id);
-  const [stylistPrompt, setStylistPrompt] = useState('');
-  const [isStylistLoading, setIsStylistLoading] = useState(false);
-  const [gateThreshold, setGateThreshold] = useState(-50);
+  const [socket, setSocket] = useState<Socket | null>(null);
+  const [isConnected, setIsConnected] = useState(false);
+  const [isStreaming, setIsStreaming] = useState(false);
+  const [currentPreset, setCurrentPreset] = useState('deep');
+  const [customPitch, setCustomPitch] = useState(-4);
+  const [gain, setGain] = useState(1.5);
+  const [noiseGate, setNoiseGate] = useState(0.015);
+  const [filterEnabled, setFilterEnabled] = useState(true);
+  const [statusMessage, setStatusMessage] = useState('Initializing...');
 
-  const engineRef = useRef<AudioEngine>(new AudioEngine());
-  const stylistRef = useRef<GeminiStylist>(new GeminiStylist());
-
-  const initDevices = async () => {
-    try {
-      const allDevices = await navigator.mediaDevices.enumerateDevices();
-      const inputs = allDevices
-        .filter(d => d.kind === 'audioinput')
-        .map(d => ({ deviceId: d.deviceId, label: d.label || 'Default Microphone' }));
-      setDevices(inputs);
-      if (inputs.length > 0) setSelectedInput(inputs[0].deviceId);
-    } catch (err) {
-      console.error('Device listing failed', err);
-    }
-  };
-
-  useEffect(() => { initDevices(); }, []);
-  
   useEffect(() => {
-    if (status === AppStatus.ACTIVE) {
-      engineRef.current.updateSettings(settings);
-    }
-  }, [settings, status]);
+    const newSocket = io('http://127.0.0.1:5000', {
+      transports: ['websocket', 'polling']
+    });
 
-  const toggleEngine = async () => {
-    if (status === AppStatus.ACTIVE) {
-      await engineRef.current.stop();
-      setStatus(AppStatus.IDLE);
-    } else {
-      setStatus(AppStatus.INITIALIZING);
-      try {
-        await engineRef.current.initialize(selectedInput);
-        engineRef.current.setGateThreshold(gateThreshold);
-        engineRef.current.updateSettings(settings);
-        setStatus(AppStatus.ACTIVE);
-      } catch (err) {
-        setStatus(AppStatus.ERROR);
+    newSocket.on('connect', () => {
+      console.log('✅ Connected to backend');
+      setIsConnected(true);
+      setStatusMessage('Connected to voice engine');
+      newSocket.emit('get_status');
+    });
+
+    newSocket.on('disconnect', () => {
+      console.log('⚠️ Disconnected from backend');
+      setIsConnected(false);
+      setIsStreaming(false);
+      setStatusMessage('Disconnected from backend');
+    });
+
+    newSocket.on('status', (data) => {
+      console.log('Status update:', data);
+      setStatusMessage(data.msg || 'Status updated');
+      if (data.streaming !== undefined) {
+        setIsStreaming(data.streaming);
       }
+    });
+
+    newSocket.on('current_settings', (data) => {
+      console.log('Current settings:', data);
+      setCustomPitch(data.pitch);
+      setGain(data.gain);
+      setNoiseGate(data.noise_gate);
+      setFilterEnabled(data.filter_enabled);
+      setIsStreaming(data.streaming);
+    });
+
+    setSocket(newSocket);
+
+    return () => {
+      newSocket.close();
+    };
+  }, []);
+
+  const handlePresetChange = (preset: VoicePreset) => {
+    if (!socket || !isConnected) {
+      setStatusMessage('Not connected to backend!');
+      return;
     }
+
+    socket.emit('change_voice', { pitch: preset.pitch });
+    setCurrentPreset(preset.id);
+    setCustomPitch(preset.pitch);
+    setStatusMessage(`Voice: ${preset.name}`);
   };
 
-  const handleGateChange = (val: number) => {
-    setGateThreshold(val);
-    engineRef.current.setGateThreshold(val);
+  const handleCustomPitchChange = (value: number) => {
+    if (!socket || !isConnected) return;
+    setCustomPitch(value);
+    socket.emit('change_voice', { pitch: value });
+    setCurrentPreset('custom');
   };
 
-  const updateSetting = <K extends keyof EffectSettings>(key: K, val: EffectSettings[K]) => {
-    setSettings(prev => ({ ...prev, [key]: val }));
-    setActivePreset('custom');
+  const handleGainChange = (value: number) => {
+    if (!socket || !isConnected) return;
+    setGain(value);
+    socket.emit('change_gain', { gain: value });
   };
 
-  const handleStylistSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!stylistPrompt.trim()) return;
-    setIsStylistLoading(true);
-    try {
-      const res = await stylistRef.current.generateStyle(stylistPrompt);
-      setSettings(res);
-      setActivePreset('ai-stylist');
-      setStylistPrompt('');
-    } finally {
-      setIsStylistLoading(false);
-    }
+  const handleNoiseGateChange = (value: number) => {
+    if (!socket || !isConnected) return;
+    setNoiseGate(value);
+    socket.emit('change_noise_gate', { threshold: value });
+  };
+
+  const handleFilterToggle = () => {
+    if (!socket || !isConnected) return;
+    const newState = !filterEnabled;
+    setFilterEnabled(newState);
+    socket.emit('toggle_filter', { enabled: newState });
   };
 
   return (
-    <div className="flex h-screen bg-[#070708] text-zinc-100 font-sans overflow-hidden">
-      <style>{`
-        ::-webkit-scrollbar {
-          width: 6px;
-        }
-        ::-webkit-scrollbar-track {
-          background: rgba(24, 24, 27, 0.4);
-        }
-        ::-webkit-scrollbar-thumb {
-          background: #3f3f46;
-          border-radius: 10px;
-        }
-        ::-webkit-scrollbar-thumb:hover {
-          background: #4f46e5;
-        }
-      `}</style>
+    <div style={{
+      minHeight: '100vh',
+      background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
+      padding: '20px',
+      fontFamily: 'system-ui, -apple-system, sans-serif'
+    }}>
+      <div style={{
+        maxWidth: '1000px',
+        margin: '0 auto',
+        background: 'rgba(255, 255, 255, 0.95)',
+        borderRadius: '20px',
+        padding: '30px',
+        boxShadow: '0 20px 60px rgba(0,0,0,0.3)'
+      }}>
+        
+        {/* Header */}
+        <div style={{ textAlign: 'center', marginBottom: '30px' }}>
+          <h1 style={{ 
+            fontSize: '42px', 
+            margin: '0 0 10px 0',
+            background: 'linear-gradient(135deg, #667eea, #764ba2)',
+            WebkitBackgroundClip: 'text',
+            WebkitTextFillColor: 'transparent'
+          }}>
+            🎙️ VoicePulse DSP
+          </h1>
+          <p style={{ color: '#666', margin: 0, fontSize: '16px' }}>
+            Real-time Voice Changer • High Quality Audio Processing
+          </p>
+        </div>
 
-      {/* Precision Sidebar */}
-      <aside className="w-80 border-r border-zinc-800 bg-zinc-900/10 flex flex-col backdrop-blur-3xl shrink-0">
-        <div className="p-8 border-b border-zinc-800/50">
-          <div className="flex items-center gap-4 mb-2">
-            <div className="w-10 h-10 rounded-xl bg-indigo-500 flex items-center justify-center shadow-xl shadow-indigo-500/20">
-               <svg className="w-6 h-6 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" /></svg>
-            </div>
-            <div>
-              <h1 className="font-black text-lg leading-none tracking-tight">VOICE PULSE</h1>
-              <span className="text-[8px] text-zinc-600 font-bold uppercase tracking-[0.3em] mt-1 block">Refined DSP v2</span>
-            </div>
+        {/* Status Cards */}
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '15px', marginBottom: '25px' }}>
+          <div style={{
+            padding: '15px',
+            background: isConnected ? '#d4edda' : '#f8d7da',
+            color: isConnected ? '#155724' : '#721c24',
+            borderRadius: '10px',
+            textAlign: 'center',
+            fontWeight: '500'
+          }}>
+            {isConnected ? '🟢' : '🔴'} Backend: {isConnected ? 'Connected' : 'Disconnected'}
+          </div>
+          
+          <div style={{
+            padding: '15px',
+            background: isStreaming ? '#d4edda' : '#fff3cd',
+            color: isStreaming ? '#155724' : '#856404',
+            borderRadius: '10px',
+            textAlign: 'center',
+            fontWeight: '500'
+          }}>
+            {isStreaming ? '🎤' : '⏸️'} Audio: {isStreaming ? 'Streaming' : 'Idle'}
           </div>
         </div>
 
-        <nav className="flex-1 overflow-y-auto p-6 space-y-1 scrollbar-thin">
-          <p className="text-[10px] font-black text-zinc-600 uppercase tracking-widest mb-4 px-2">Identity Presets</p>
-          <div className="space-y-1.5">
-            {DEFAULT_PRESETS.map(p => (
+        {/* Status Message */}
+        <div style={{
+          padding: '12px',
+          background: '#e7f3ff',
+          color: '#1976D2',
+          borderRadius: '8px',
+          marginBottom: '25px',
+          textAlign: 'center',
+          fontSize: '14px'
+        }}>
+          {statusMessage}
+        </div>
+
+        {/* Voice Presets */}
+        <div style={{ marginBottom: '30px' }}>
+          <h2 style={{ fontSize: '20px', marginBottom: '15px', color: '#333' }}>
+            🎭 Voice Presets
+          </h2>
+          <div style={{
+            display: 'grid',
+            gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))',
+            gap: '12px'
+          }}>
+            {VOICE_PRESETS.map((preset) => (
               <button
-                key={p.id}
-                onClick={() => { setActivePreset(p.id); setSettings(p.settings); }}
-                className={`w-full flex items-center gap-4 px-4 py-3 rounded-xl transition-all border ${activePreset === p.id ? 'bg-indigo-600 border-indigo-400 text-white shadow-xl shadow-indigo-500/10' : 'bg-transparent border-transparent hover:bg-zinc-800/40 text-zinc-500'}`}
+                key={preset.id}
+                onClick={() => handlePresetChange(preset)}
+                disabled={!isConnected}
+                style={{
+                  padding: '18px',
+                  background: currentPreset === preset.id 
+                    ? 'linear-gradient(135deg, #667eea, #764ba2)' 
+                    : '#f8f9fa',
+                  color: currentPreset === preset.id ? 'white' : '#333',
+                  border: currentPreset === preset.id ? 'none' : '2px solid #e0e0e0',
+                  borderRadius: '12px',
+                  cursor: isConnected ? 'pointer' : 'not-allowed',
+                  transition: 'all 0.2s ease',
+                  opacity: isConnected ? 1 : 0.5,
+                  textAlign: 'left',
+                  fontSize: '14px'
+                }}
               >
-                <span className="text-lg opacity-80">{p.icon}</span>
-                <span className="text-sm font-bold truncate">{p.name}</span>
+                <div style={{ fontSize: '24px', marginBottom: '5px' }}>{preset.emoji}</div>
+                <div style={{ fontSize: '16px', fontWeight: '600', marginBottom: '3px' }}>
+                  {preset.name}
+                </div>
+                <div style={{ fontSize: '12px', opacity: 0.8, marginBottom: '3px' }}>
+                  {preset.description}
+                </div>
+                <div style={{ fontSize: '11px', opacity: 0.7 }}>
+                  Pitch: {preset.pitch > 0 ? '+' : ''}{preset.pitch}
+                </div>
               </button>
             ))}
           </div>
-        </nav>
-
-        <div className="p-6 border-t border-zinc-800">
-          <label className="block text-[10px] font-black text-zinc-600 uppercase mb-4 tracking-widest">Input Engine</label>
-          <div className="space-y-4">
-            <select 
-              className="w-full bg-zinc-800/40 text-xs rounded-xl p-3 border border-zinc-700/50 outline-none focus:ring-2 ring-indigo-500/30 transition-all text-zinc-300"
-              value={selectedInput}
-              onChange={(e) => setSelectedInput(e.target.value)}
-              disabled={status === AppStatus.ACTIVE}
-            >
-              {devices.map(d => <option key={d.deviceId} value={d.deviceId}>{d.label}</option>)}
-            </select>
-            
-            <button
-              onClick={toggleEngine}
-              className={`w-full py-4 rounded-xl font-black text-xs uppercase tracking-[0.2em] transition-all shadow-lg ${status === AppStatus.ACTIVE ? 'bg-rose-600 hover:bg-rose-500 text-white shadow-rose-600/10' : 'bg-indigo-600 hover:bg-indigo-500 text-white shadow-indigo-500/10'}`}
-            >
-              {status === AppStatus.ACTIVE ? 'Shutdown' : 'Initialize'}
-            </button>
-          </div>
         </div>
-      </aside>
 
-      {/* Main Studio Interface */}
-      <main className="flex-1 p-10 overflow-y-auto bg-[#070708]">
-        <div className="max-w-6xl mx-auto space-y-10">
-          
-          <header className="flex justify-between items-end">
-            <div>
-              <h2 className="text-4xl font-black tracking-tighter text-white">Manual Tuning Deck</h2>
-              <p className="text-zinc-500 mt-2">Sculpt your vocal presence with modular DSP precision.</p>
-            </div>
-            <div className="flex gap-4">
-              <div className="px-5 py-3 bg-zinc-900/30 rounded-2xl border border-zinc-800/50 flex flex-col items-center">
-                <span className="text-[9px] font-black text-zinc-600 uppercase mb-1">Gate Sensitivity</span>
-                <div className="flex items-center gap-3">
-                  <span className="text-[10px] font-mono text-indigo-400">{gateThreshold}dB</span>
-                  <input type="range" min="-80" max="-10" value={gateThreshold} onChange={(e) => handleGateChange(parseInt(e.target.value))} className="w-20 h-1 bg-zinc-800 rounded-lg accent-indigo-500" />
-                </div>
-              </div>
-              <button 
-                onClick={() => updateSetting('bypass', !settings.bypass)}
-                className={`px-6 rounded-2xl border transition-all flex flex-col justify-center items-center ${settings.bypass ? 'bg-rose-500/10 border-rose-500' : 'bg-zinc-900/30 border-zinc-800'}`}
-              >
-                <span className="text-[9px] font-black uppercase text-zinc-500">Bypass</span>
-                <span className={`text-[10px] font-bold ${settings.bypass ? 'text-rose-500' : 'text-emerald-500'}`}>{settings.bypass ? 'ACTIVE' : 'READY'}</span>
-              </button>
-            </div>
-          </header>
+        {/* Advanced Controls */}
+        <div style={{
+          padding: '25px',
+          background: '#f8f9fa',
+          borderRadius: '12px',
+          marginBottom: '20px'
+        }}>
+          <h2 style={{ fontSize: '20px', marginBottom: '20px', color: '#333' }}>
+            🎚️ Advanced Controls
+          </h2>
 
-          <Visualizer analyser={engineRef.current.getAnalyser()} />
-
-          <div className="grid grid-cols-1 xl:grid-cols-3 gap-8">
-            {/* Tuner Col 1: Identity */}
-            <div className="p-8 bg-zinc-900/10 rounded-[2rem] border border-zinc-800/40 space-y-8">
-              <div className="flex items-center gap-3 mb-2">
-                <div className="w-1.5 h-1.5 rounded-full bg-indigo-500"></div>
-                <h3 className="text-[10px] font-black text-zinc-400 uppercase tracking-widest">Vocal Identity</h3>
-              </div>
-              <EffectSlider label="Gender Transpose" unit="st" min={-12} max={12} step={1} value={settings.pitch} onChange={v => updateSetting('pitch', v)} />
-              <EffectSlider label="Presence / Clarity" unit="%" min={0} max={1} step={0.01} value={settings.clarity} onChange={v => updateSetting('clarity', v)} />
-              <EffectSlider label="Resonance" unit="Q" min={0.1} max={10} step={0.1} value={settings.resonance} onChange={v => updateSetting('resonance', v)} />
-            </div>
-
-            {/* Tuner Col 2: Character */}
-            <div className="p-8 bg-zinc-900/10 rounded-[2rem] border border-zinc-800/40 space-y-8">
-              <div className="flex items-center gap-3 mb-2">
-                <div className="w-1.5 h-1.5 rounded-full bg-emerald-500"></div>
-                <h3 className="text-[10px] font-black text-zinc-400 uppercase tracking-widest">Acoustic Texture</h3>
-              </div>
-              <EffectSlider label="Spectral Cutoff" unit="Hz" min={500} max={15000} step={100} value={settings.filterFreq} onChange={v => updateSetting('filterFreq', v)} />
-              <EffectSlider label="Harmonic Grit" unit="%" min={0} max={1} step={0.01} value={settings.distortion} onChange={v => updateSetting('distortion', v)} />
-              <EffectSlider label="Robot Ring" unit="Hz" min={0} max={100} step={1} value={settings.robotFreq} onChange={v => updateSetting('robotFreq', v)} />
-            </div>
-
-            {/* Tuner Col 3: Master */}
-            <div className="p-8 bg-zinc-900/10 rounded-[2rem] border border-zinc-800/40 space-y-8">
-              <div className="flex items-center gap-3 mb-2">
-                <div className="w-1.5 h-1.5 rounded-full bg-amber-500"></div>
-                <h3 className="text-[10px] font-black text-zinc-400 uppercase tracking-widest">Master Mix</h3>
-              </div>
-              <EffectSlider label="DSP Wetness" unit="%" min={0} max={1} step={0.01} value={settings.dryWet} onChange={v => updateSetting('dryWet', v)} />
-              <EffectSlider label="Output Volume" unit="x" min={0} max={2} step={0.05} value={settings.gain} onChange={v => updateSetting('gain', v)} />
-              <div className="pt-4 border-t border-zinc-800/40">
-                <p className="text-[9px] font-bold text-zinc-600 uppercase mb-2">Signal Health</p>
-                <div className="h-1.5 bg-zinc-800 rounded-full overflow-hidden">
-                   <div className="h-full bg-emerald-500/50 w-[85%]"></div>
-                </div>
-              </div>
+          {/* Custom Pitch */}
+          <div style={{ marginBottom: '20px' }}>
+            <label style={{ display: 'block', marginBottom: '8px', color: '#666', fontSize: '14px', fontWeight: '500' }}>
+              🎵 Custom Pitch: {customPitch > 0 ? '+' : ''}{customPitch} semitones
+            </label>
+            <input
+              type="range"
+              min="-12"
+              max="12"
+              step="1"
+              value={customPitch}
+              onChange={(e) => handleCustomPitchChange(Number(e.target.value))}
+              disabled={!isConnected}
+              style={{ width: '100%', cursor: isConnected ? 'pointer' : 'not-allowed' }}
+            />
+            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '11px', color: '#999', marginTop: '5px' }}>
+              <span>-12 (Very Deep)</span>
+              <span>0 (Normal)</span>
+              <span>+12 (Very High)</span>
             </div>
           </div>
 
-          <section>
-            <div className="relative p-[1px] bg-gradient-to-br from-indigo-500/30 via-zinc-800 to-indigo-500/30 rounded-[2.5rem] overflow-hidden group">
-              <div className="bg-[#0c0c0e]/80 rounded-[2.45rem] p-8 transition-all group-hover:bg-[#111114]/90">
-                <div className="flex items-center gap-5 mb-6">
-                  <div className="w-12 h-12 rounded-2xl bg-zinc-900 border border-zinc-800 flex items-center justify-center text-2xl shadow-inner">⚡</div>
-                  <div>
-                    <h3 className="text-xl font-black text-white tracking-tight">AI Style Generator</h3>
-                    <p className="text-zinc-500 text-sm">Convert descriptive text into complex identity chains.</p>
-                  </div>
-                </div>
-                <form onSubmit={handleStylistSubmit} className="flex gap-4">
-                  <input 
-                    className="flex-1 bg-zinc-900/40 border border-zinc-800/80 rounded-[1.2rem] px-6 py-4 outline-none focus:border-indigo-500/50 transition-all placeholder:text-zinc-700 text-base" 
-                    placeholder="E.g. 'Smooth deep-voiced narrator with a hint of robotic mystery'..."
-                    value={stylistPrompt}
-                    onChange={e => setStylistPrompt(e.target.value)}
-                  />
-                  <button 
-                    disabled={isStylistLoading || !stylistPrompt}
-                    className="bg-zinc-100 text-zinc-950 px-8 py-4 rounded-[1.2rem] font-black text-xs uppercase tracking-widest hover:bg-white disabled:opacity-20 transition-all"
-                  >
-                    {isStylistLoading ? 'Modeling...' : 'Sync Settings'}
-                  </button>
-                </form>
-              </div>
+          {/* Gain Control */}
+          <div style={{ marginBottom: '20px' }}>
+            <label style={{ display: 'block', marginBottom: '8px', color: '#666', fontSize: '14px', fontWeight: '500' }}>
+              🔊 Volume Boost: {gain.toFixed(1)}x
+            </label>
+            <input
+              type="range"
+              min="0.5"
+              max="3.0"
+              step="0.1"
+              value={gain}
+              onChange={(e) => handleGainChange(Number(e.target.value))}
+              disabled={!isConnected}
+              style={{ width: '100%', cursor: isConnected ? 'pointer' : 'not-allowed' }}
+            />
+            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '11px', color: '#999', marginTop: '5px' }}>
+              <span>0.5x (Quiet)</span>
+              <span>1.5x (Recommended)</span>
+              <span>3.0x (Loud)</span>
             </div>
-          </section>
+          </div>
 
-          <footer className="pt-10 border-t border-zinc-900 flex justify-between items-center text-zinc-600 text-[9px] font-black uppercase tracking-[0.4em]">
-            <div className="flex items-center gap-3">
-              <div className="w-1.5 h-1.5 rounded-full bg-emerald-500"></div>
-              LOW-LATENCY KERNEL ACTIVE
+          {/* Noise Gate */}
+          <div style={{ marginBottom: '20px' }}>
+            <label style={{ display: 'block', marginBottom: '8px', color: '#666', fontSize: '14px', fontWeight: '500' }}>
+              🚪 Noise Gate: {noiseGate.toFixed(3)}
+            </label>
+            <input
+              type="range"
+              min="0.001"
+              max="0.050"
+              step="0.001"
+              value={noiseGate}
+              onChange={(e) => handleNoiseGateChange(Number(e.target.value))}
+              disabled={!isConnected}
+              style={{ width: '100%', cursor: isConnected ? 'pointer' : 'not-allowed' }}
+            />
+            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '11px', color: '#999', marginTop: '5px' }}>
+              <span>0.001 (Sensitive)</span>
+              <span>0.015 (Default)</span>
+              <span>0.050 (Aggressive)</span>
             </div>
-            <div className="flex gap-8">
-              <span>PRECISION_TUNER: ENABLED</span>
-              <span>FFT_SAMPLING: 1024</span>
-              <span>MODULAR_DSP_V2</span>
-            </div>
-          </footer>
+          </div>
+
+          {/* Filter Toggle */}
+          <div style={{ marginTop: '15px' }}>
+            <label style={{ display: 'flex', alignItems: 'center', cursor: isConnected ? 'pointer' : 'not-allowed', userSelect: 'none' }}>
+              <input
+                type="checkbox"
+                checked={filterEnabled}
+                onChange={handleFilterToggle}
+                disabled={!isConnected}
+                style={{ marginRight: '10px', width: '18px', height: '18px', cursor: isConnected ? 'pointer' : 'not-allowed' }}
+              />
+              <span style={{ fontSize: '14px', fontWeight: '500', color: '#666' }}>
+                🎛️ Enable Noise Reduction & Low-pass Filter
+              </span>
+            </label>
+          </div>
         </div>
-      </main>
+
+        {/* Instructions */}
+        <div style={{
+          padding: '20px',
+          background: '#e7f3ff',
+          borderLeft: '4px solid #2196F3',
+          borderRadius: '8px'
+        }}>
+          <h3 style={{ margin: '0 0 10px 0', fontSize: '16px', color: '#1976D2' }}>
+            ℹ️ How to Use
+          </h3>
+          <ol style={{ margin: 0, paddingLeft: '20px', color: '#555', fontSize: '14px', lineHeight: '1.6' }}>
+            <li>Run backend: <code style={{ background: '#fff', padding: '2px 6px', borderRadius: '3px' }}>python server.py</code></li>
+            <li>Wait for "Audio Stream ACTIVE" message</li>
+            <li>Open this frontend in browser</li>
+            <li>Select a voice preset or customize with sliders</li>
+            <li>Speak into your microphone - voice is modified in real-time</li>
+            <li>Set Discord/WhatsApp input to <strong>"CABLE Output"</strong></li>
+          </ol>
+        </div>
+      </div>
     </div>
   );
 };
